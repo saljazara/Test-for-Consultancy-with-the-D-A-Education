@@ -1,61 +1,55 @@
 import pandas as pd
 import os
-from user_profile import RAW_DATA_DIR, OUTPUTS_DIR
 
-# === Load UNICEF data ===
-anc4_path = os.path.join(RAW_DATA_DIR, "fusion_GLOBAL_DATAFLOW_UNICEF_1.0_.MNCH_ANC4..CSV")
-sba_path = os.path.join(RAW_DATA_DIR, "fusion_GLOBAL_DATAFLOW_UNICEF_1.0_.MNCH_SAB..CSV")
-classification_path = os.path.join(RAW_DATA_DIR, "On-track and off-track countries.xlsx")
-pop_path = os.path.join(RAW_DATA_DIR, "WPP2022_GEN_F01_DEMOGRAPHIC_INDICATORS_COMPACT_REV1.xlsx")
+# Define paths
+RAW_DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "01_rawdata")
+OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "..", "outputs")
 
-# Load ANC4 & SBA
-anc4_df = pd.read_csv(anc4_path)
-sba_df = pd.read_csv(sba_path)
+# Load datasets
+anc4 = pd.read_csv(os.path.join(RAW_DATA_DIR, "ANC4.CSV"))
+sba = pd.read_csv(os.path.join(RAW_DATA_DIR, "SBA.CSV"))
+status = pd.read_excel(os.path.join(RAW_DATA_DIR, "On-track and off-track countries.xlsx"))
+population = pd.read_excel(os.path.join(RAW_DATA_DIR, "WPP2022_GEN_F01_DEMOGRAPHIC_INDICATORS_COMPACT_REV1.xlsx"))
 
-# Filter to 2018–2022, take latest year per country
-anc4_filtered = anc4_df[anc4_df['Year'].between(2018, 2022)]
-sba_filtered = sba_df[sba_df['Year'].between(2018, 2022)]
+# Filter most recent year (2018–2022)
+anc4_filtered = anc4[anc4["TIME_PERIOD"].between(2018, 2022)]
+sba_filtered = sba[sba["TIME_PERIOD"].between(2018, 2022)]
 
-anc4_latest = anc4_filtered.sort_values('Year').groupby('Country', as_index=False).last()
-sba_latest = sba_filtered.sort_values('Year').groupby('Country', as_index=False).last()
+# Keep latest year per country
+anc4_latest = anc4_filtered.sort_values("TIME_PERIOD").groupby("REF_AREA:Geographic area").last().reset_index()
+sba_latest = sba_filtered.sort_values("TIME_PERIOD").groupby("REF_AREA:Geographic area").last().reset_index()
 
-# Load population data for 2022 (Projected births)
-pop_df = pd.read_excel(pop_path, sheet_name='Estimates')
-pop_2022 = pop_df[pop_df['Time'] == 2022][['Location', 'Births']]
+# Merge ANC4 and SBA
+merged = pd.merge(anc4_latest[["REF_AREA:Geographic area", "OBS_VALUE"]], 
+                  sba_latest[["REF_AREA:Geographic area", "OBS_VALUE"]],
+                  on="REF_AREA:Geographic area", suffixes=("_ANC4", "_SBA"))
 
-# Load classification of on-track / off-track
-status_df = pd.read_excel(classification_path)
-status_df = status_df[['Country', 'Status.U5MR']]
+# Add country status (on-track / off-track)
+merged = merged.rename(columns={"REF_AREA:Geographic area": "ISO3Code"})
+merged = pd.merge(merged, status, on="ISO3Code", how="inner")
 
-# Clean status
-status_df['Track'] = status_df['Status.U5MR'].map({
-    'on-track': 'On Track',
-    'achieved': 'On Track',
-    'acceleration needed': 'Off Track'
-})
+# Prepare population births data (2022)
+births = population[(population["Year"] == 2022)][["ISO3 Alpha-code", "Births (thousands)"]]
+births = births.rename(columns={"ISO3 Alpha-code": "ISO3Code", "Births (thousands)": "Births_2022"})
 
-# === Merge all datasets ===
-merged = (
-    anc4_latest
-    .merge(sba_latest[['Country', 'Value']], on='Country', suffixes=('_ANC4', '_SBA'))
-    .merge(status_df[['Country', 'Track']], on='Country')
-    .merge(pop_2022, left_on='Country', right_on='Location')
-)
+# Merge births
+merged = pd.merge(merged, births, on="ISO3Code", how="inner")
 
-# === Compute Population-Weighted Averages ===
-def weighted_average(df, value_column, weight_column='Births'):
-    return (df[value_column] * df[weight_column]).sum() / df[weight_column].sum()
+# Calculate weighted ANC4 and SBA by birth count
+for service in ["ANC4", "SBA"]:
+    merged[f"{service}_weighted"] = merged[f"OBS_VALUE_{service}"] * merged["Births_2022"]
 
-results = []
+# Group by status and compute weighted average
+grouped = merged.groupby("Status.U5MR").agg({
+    "ANC4_weighted": "sum",
+    "SBA_weighted": "sum",
+    "Births_2022": "sum"
+}).reset_index()
 
-for group in ['On Track', 'Off Track']:
-    subset = merged[merged['Track'] == group]
-    anc4_avg = weighted_average(subset, 'Value_ANC4')
-    sba_avg = weighted_average(subset, 'Value_SBA')
-    results.append({'Group': group, 'ANC4': anc4_avg, 'SBA': sba_avg})
+grouped["ANC4_pop_weighted"] = grouped["ANC4_weighted"] / grouped["Births_2022"]
+grouped["SBA_pop_weighted"] = grouped["SBA_weighted"] / grouped["Births_2022"]
 
-results_df = pd.DataFrame(results)
+# Save to CSV
+grouped.to_csv(os.path.join(OUTPUT_DIR, "population_weighted_coverage.csv"), index=False)
 
-# === Save output ===
-results_df.to_csv(os.path.join(OUTPUTS_DIR, 'coverage_results.csv'), index=False)
-print("✅ Analysis complete. Results saved in outputs/coverage_results.csv")
+print("✅ Population-weighted ANC4 and SBA coverage calculated and saved.")
