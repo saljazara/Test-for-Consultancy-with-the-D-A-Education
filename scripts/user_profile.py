@@ -10,4 +10,3 @@ OUTPUTS_DIR = os.path.join(BASE_DIR, "outputs")
 
 # Create outputs folder if it doesn't exist
 os.makedirs(OUTPUTS_DIR, exist_ok=True)
-
